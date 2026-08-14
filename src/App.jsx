@@ -978,9 +978,9 @@ export default function TeamEcho() {
             <span className="lbl">Home</span>
           </button>
           {[
-            ["Tools", <path key="t" d="M14.7 6.3a4 4 0 0 0-5.4 5.4L3 18v3h3l6.3-6.3a4 4 0 0 0 5.4-5.4l-2.6 2.6-2.4-2.4 2.6-2.6z" />],
-            ["Docs", <g key="d"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" /><path d="M14 2v6h6" /></g>],
-            ["Calendar", <g key="c"><rect x="3" y="4" width="18" height="18" rx="3" /><path d="M16 2v4M8 2v4M3 10h18" /></g>],
+            ["Meet The Team", <g key="team"><circle cx="9" cy="8" r="3.2" /><path d="M3.5 20a5.5 5.5 0 0 1 11 0" /><path d="M16 5.2a3.2 3.2 0 0 1 0 5.9" /><path d="M17 14.4a5.5 5.5 0 0 1 3.5 5.1" /></g>],
+            ["Huddle Metrics", <g key="metrics"><path d="M4 20V10" /><path d="M10 20V4" /><path d="M16 20v-7" /><path d="M22 20H2" /></g>],
+            ["Echo Chamber", <g key="echo"><path d="M7.5 15H6a3 3 0 0 1-3-3V7a3 3 0 0 1 3-3h7a3 3 0 0 1 3 3v.5" /><path d="M21 14a3 3 0 0 0-3-3h-6a3 3 0 0 0-3 3v2a3 3 0 0 0 3 3h.5l-.5 2.5L17.5 19H18a3 3 0 0 0 3-3z" /></g>],
           ].map(([name, icon]) => (
             <div key={name} className="nav-item ghost">
               <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
