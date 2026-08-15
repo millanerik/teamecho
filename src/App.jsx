@@ -10,6 +10,7 @@ import {
   uploadBoardMedia,
   setAvatar as sbSetAvatar,
 } from "./supabase.js";
+import { searchGifs, giphyConfigured } from "./giphy.js";
 
 /* ============================================================
    TEAM ECHO — internal team hub
@@ -387,15 +388,42 @@ body { background:#262A31; }
   border-top-color:var(--accent-bright); animation:te-spin .8s linear infinite;
 }
 @keyframes te-spin{to{transform:rotate(360deg)}}
-@media (max-width:760px){
-  .shell{padding:10px; gap:10px}
-  .rail{width:72px; padding:16px 10px 12px}
-  .rail .brand-name, .nav-item .lbl, .nav-badge, .rail-me .who, .rail-me .role-chip, .rail-label{display:none}
-  .nav-item{justify-content:center}
-  .rail-me{justify-content:center}
-  .theme-pill{margin-left:auto; margin-right:auto}
-  .search-pill{width:140px}
+.sticker.selected .inner{border-color:var(--accent-bright); box-shadow:0 0 0 2px var(--accent-bright), var(--sticker-shadow);}
+.pin-toolbar{
+  position:absolute; left:50%; bottom:-48px; width:max-content; translate:-50% 0;
+  display:flex; align-items:center; gap:2px; padding:5px;
+  background:var(--panel); border:1px solid var(--border-strong); border-radius:999px;
+  box-shadow:var(--shadow); pointer-events:auto;
 }
+.pin-toolbar button{
+  width:30px; height:30px; border-radius:50%; border:none; background:transparent;
+  color:var(--ink); display:grid; place-items:center; cursor:pointer; transition:background .15s;
+}
+.pin-toolbar button:hover:not(:disabled){background:var(--card-2)}
+.pin-toolbar button:disabled{opacity:.35; cursor:not-allowed}
+.pin-tb-val{font-family:var(--font-mono); font-size:11px; color:var(--ink-soft); min-width:34px; text-align:center}
+.pin-tb-sep{width:1px; height:18px; background:var(--border-strong); margin:0 3px}
+
+/* ---------- GIF picker ---------- */
+.gif-modal{width:min(560px,100%)}
+.gif-head{display:flex; align-items:center; justify-content:space-between; margin-bottom:14px}
+.gif-head h3{margin:0}
+.gif-search{display:flex; gap:8px; margin-bottom:14px}
+.gif-grid{
+  display:grid; grid-template-columns:repeat(3,1fr); gap:8px;
+  max-height:340px; overflow-y:auto; padding:2px; margin:0 -2px;
+}
+.gif-cell{
+  border:1px solid var(--border); border-radius:12px; overflow:hidden; cursor:pointer;
+  background:var(--card); padding:0; aspect-ratio:1; transition:border-color .15s, transform .1s;
+}
+.gif-cell:hover{border-color:var(--accent-bright); transform:scale(1.03)}
+.gif-cell img{width:100%; height:100%; object-fit:cover; display:block}
+.gif-empty{
+  grid-column:1 / -1; display:grid; place-items:center; min-height:160px;
+  color:var(--ink-faint); font-size:13px; text-align:center;
+}
+.gif-foot{font-family:var(--font-mono); font-size:10px; color:var(--ink-faint); text-align:right; margin-top:12px; letter-spacing:.04em}
 `;
 
 /* ============================ components ============================ */
@@ -487,6 +515,14 @@ export default function TeamEcho() {
   const [noteColor, setNoteColor] = useState("sun");
   const [profileOpen, setProfileOpen] = useState(false);
   const [busy, setBusy] = useState(false);
+  // GIF picker
+  const [gifOpen, setGifOpen] = useState(false);
+  const [gifQuery, setGifQuery] = useState("");
+  const [gifResults, setGifResults] = useState([]);
+  const [gifLoading, setGifLoading] = useState(false);
+  const [gifError, setGifError] = useState("");
+  // currently selected pin (shows resize/rotate toolbar); null = none
+  const [selectedId, setSelectedId] = useState(null);
   const [toast, setToast] = useState("");
 
   const canvasRef = useRef(null);
@@ -667,12 +703,73 @@ export default function TeamEcho() {
 
   const removeItem = async (item) => {
     setItems((prev) => prev.filter((i) => i.id !== item.id));
+    if (selectedId === item.id) setSelectedId(null);
     try {
       await deleteBoardItem(item.id);
     } catch (e) {
       console.error(e);
       say("Couldn't remove that pin.");
     }
+  };
+
+  /* ---------- resize & rotate (images / gifs) ---------- */
+  const MIN_W = 90;    // px — keep pins from vanishing
+  const MAX_W = 340;   // px — "nothing too big": ~a third of a typical board
+
+  const clampW = (w) => Math.max(MIN_W, Math.min(MAX_W, Math.round(w)));
+
+  // Persist size/rotation, debounced so we don't spam the DB while nudging.
+  const persistTimer = useRef(null);
+  const persistPin = (id, patch) => {
+    clearTimeout(persistTimer.current);
+    persistTimer.current = setTimeout(() => {
+      updateBoardItem(id, patch).catch(console.error);
+    }, 500);
+  };
+
+  const resizePin = (item, deltaW) => {
+    const next = clampW(item.w + deltaW);
+    if (next === item.w) return;
+    setItems((prev) => prev.map((i) => (i.id === item.id ? { ...i, w: next } : i)));
+    persistPin(item.id, { w: next });
+  };
+
+  const rotatePin = (item, deltaDeg) => {
+    const next = Math.round((item.rot + deltaDeg) * 10) / 10;
+    setItems((prev) => prev.map((i) => (i.id === item.id ? { ...i, rot: next } : i)));
+    persistPin(item.id, { rot: next });
+  };
+
+  const resetPin = (item) => {
+    setItems((prev) => prev.map((i) => (i.id === item.id ? { ...i, w: 180, rot: 0 } : i)));
+    persistPin(item.id, { w: 180, rot: 0 });
+  };
+
+  /* ---------- GIF picker ---------- */
+  const runGifSearch = async (q) => {
+    setGifLoading(true);
+    setGifError("");
+    try {
+      setGifResults(await searchGifs(q));
+    } catch (e) {
+      console.error(e);
+      setGifError(giphyConfigured ? "Couldn't load GIFs. Try again." : "GIF search isn't set up yet.");
+      setGifResults([]);
+    }
+    setGifLoading(false);
+  };
+
+  const openGifPicker = () => {
+    setAddOpen(false);
+    setGifOpen(true);
+    setGifQuery("");
+    if (giphyConfigured) runGifSearch(""); // trending on open
+    else setGifError("GIF search isn't set up yet.");
+  };
+
+  const pinGif = async (gif) => {
+    setGifOpen(false);
+    await addItem({ type: "gif", src: gif.fullUrl, w: 200 });
   };
 
   /* ---------- drag & drop ---------- */
@@ -720,6 +817,14 @@ export default function TeamEcho() {
     else if ((e.key === "Delete" || e.key === "Backspace") && (isAdmin || item.owner === me.id)) {
       e.preventDefault();
       removeItem(item);
+      return;
+    }
+    // resize / rotate for images & gifs you can edit
+    else if ((item.type === "image" || item.type === "gif") && (isAdmin || item.owner === me.id)) {
+      if (e.key === "+" || e.key === "=") { e.preventDefault(); resizePin(item, 24); return; }
+      if (e.key === "-" || e.key === "_") { e.preventDefault(); resizePin(item, -24); return; }
+      if (e.key === "[") { e.preventDefault(); rotatePin(item, -15); return; }
+      if (e.key === "]") { e.preventDefault(); rotatePin(item, 15); return; }
       return;
     } else return;
     e.preventDefault();
@@ -1067,27 +1172,30 @@ export default function TeamEcho() {
                 );
               })
               .map((item) => {
-              const canDelete = isAdmin || item.owner === me.id;
+              const canEdit = isAdmin || item.owner === me.id;
               const noteC = NOTE_COLORS.find((c) => c.id === item.color) || NOTE_COLORS[0];
+              const isImg = item.type === "image" || item.type === "gif";
+              const isSelected = selectedId === item.id;
               return (
                 <div
                   key={item.id}
-                  className={`sticker ${dragRef.current?.id === item.id ? "dragging" : ""}`}
+                  className={`sticker ${dragRef.current?.id === item.id ? "dragging" : ""} ${isSelected ? "selected" : ""}`}
                   style={{
                     left: `${item.x}%`,
                     top: `${item.y}%`,
                     width: item.w,
-                    zIndex: item.z || 1,
+                    zIndex: isSelected ? 999 : item.z || 1,
                     transform: `rotate(${item.rot}deg)`,
                   }}
                   tabIndex={0}
                   role="group"
-                  aria-label={`${item.type === "text" ? "Note" : "Image"} pinned by ${item.ownerName}. Arrow keys move, Delete removes.`}
+                  aria-label={`${item.type === "text" ? "Note" : "Image"} pinned by ${item.ownerName}. Arrow keys move${isImg ? ", +/- resize, [ ] rotate" : ""}, Delete removes.`}
                   onKeyDown={(e) => onStickerKeyDown(e, item)}
                   onPointerDown={(e) => onStickerDown(e, item)}
                   onPointerMove={onStickerMove}
                   onPointerUp={onStickerUp}
                   onPointerCancel={onStickerUp}
+                  onClick={() => canEdit && isImg && setSelectedId(isSelected ? null : item.id)}
                 >
                   <div
                     className="inner"
@@ -1106,8 +1214,37 @@ export default function TeamEcho() {
                     )}
                   </div>
                   <div className="meta">pinned by {item.owner === me.id ? "you" : item.ownerName}</div>
-                  {canDelete && (
-                    <button className="del" onClick={() => removeItem(item)} aria-label="Remove pin">×</button>
+                  {canEdit && (
+                    <button className="del" onClick={(e) => { e.stopPropagation(); removeItem(item); }} aria-label="Remove pin">×</button>
+                  )}
+
+                  {/* resize / rotate toolbar — only for a selected image or gif you can edit */}
+                  {isSelected && isImg && canEdit && (
+                    <div
+                      className="pin-toolbar"
+                      style={{ transform: `rotate(${-item.rot}deg)` }}
+                      onPointerDown={(e) => e.stopPropagation()}
+                      onClick={(e) => e.stopPropagation()}
+                    >
+                      <button onClick={() => resizePin(item, -24)} disabled={item.w <= MIN_W} aria-label="Make smaller" title="Smaller">
+                        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><path d="M5 12h14" /></svg>
+                      </button>
+                      <span className="pin-tb-val" aria-hidden="true">{Math.round((item.w / MAX_W) * 100)}%</span>
+                      <button onClick={() => resizePin(item, 24)} disabled={item.w >= MAX_W} aria-label="Make bigger" title="Bigger">
+                        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><path d="M12 5v14M5 12h14" /></svg>
+                      </button>
+                      <span className="pin-tb-sep" />
+                      <button onClick={() => rotatePin(item, -15)} aria-label="Rotate left" title="Rotate left">
+                        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M3 12a9 9 0 1 0 3-6.7L3 8" /><path d="M3 3v5h5" /></svg>
+                      </button>
+                      <button onClick={() => rotatePin(item, 15)} aria-label="Rotate right" title="Rotate right">
+                        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 12a9 9 0 1 1-3-6.7L21 8" /><path d="M21 3v5h-5" /></svg>
+                      </button>
+                      <span className="pin-tb-sep" />
+                      <button onClick={() => resetPin(item)} aria-label="Reset size and rotation" title="Reset">
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M3 12a9 9 0 1 1 9 9" /><path d="M3 12v-5" /><path d="M3 12h5" /></svg>
+                      </button>
+                    </div>
                   )}
                 </div>
               );
@@ -1132,12 +1269,67 @@ export default function TeamEcho() {
                   </svg>
                   Pin a note
                 </button>
+                <button onClick={openGifPicker}>
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <rect x="3" y="5" width="18" height="14" rx="2.5" /><path d="M8.5 9.5v5M8.5 9.5H7m9 0h-3v5m3-2.5h-2" />
+                  </svg>
+                  Search GIFs
+                </button>
               </div>
             )}
             <input ref={fileRef} type="file" accept="image/*" hidden onChange={onPickBoardFile} />
           </div>
         </div>
       </div>
+
+      {/* GIF picker modal */}
+      {gifOpen && (
+        <div className="overlay" onClick={() => setGifOpen(false)}>
+          <div className="modal gif-modal" onClick={(e) => e.stopPropagation()}>
+            <div className="gif-head">
+              <h3>Search GIFs</h3>
+              <button className="icon-circle" style={{ width: 32, height: 32 }} onClick={() => setGifOpen(false)} aria-label="Close">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><path d="M18 6 6 18M6 6l12 12" /></svg>
+              </button>
+            </div>
+            <form
+              className="gif-search"
+              onSubmit={(e) => { e.preventDefault(); if (giphyConfigured) runGifSearch(gifQuery); }}
+            >
+              <div className="search-pill" style={{ width: "100%", marginLeft: 0 }}>
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round">
+                  <circle cx="11" cy="11" r="7" /><path d="m21 21-4.3-4.3" />
+                </svg>
+                <input
+                  autoFocus
+                  placeholder="Search GIPHY…"
+                  value={gifQuery}
+                  onChange={(e) => setGifQuery(e.target.value)}
+                  aria-label="Search GIPHY for GIFs"
+                />
+              </div>
+              <button type="submit" className="te-btn primary" disabled={!giphyConfigured || gifLoading}>
+                {gifLoading ? "…" : "Search"}
+              </button>
+            </form>
+
+            <div className="gif-grid">
+              {gifError && <div className="gif-empty">{gifError}</div>}
+              {!gifError && gifLoading && <div className="gif-empty"><div className="spinner" /></div>}
+              {!gifError && !gifLoading && gifResults.length === 0 && (
+                <div className="gif-empty">No GIFs found. Try another search.</div>
+              )}
+              {!gifLoading &&
+                gifResults.map((g) => (
+                  <button key={g.id} className="gif-cell" onClick={() => pinGif(g)} title={g.title} aria-label={`Pin GIF: ${g.title}`}>
+                    <img src={g.previewUrl} alt={g.title} loading="lazy" />
+                  </button>
+                ))}
+            </div>
+            <div className="gif-foot">Powered by GIPHY</div>
+          </div>
+        </div>
+      )}
 
       {/* note modal */}
       {noteOpen && (
