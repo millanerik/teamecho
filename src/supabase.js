@@ -156,6 +156,8 @@ export async function updateBoardItem(id, patch) {
   if ("x" in patch) row.x = patch.x;
   if ("y" in patch) row.y = patch.y;
   if ("z" in patch) row.z = patch.z;
+  if ("w" in patch) row.w = patch.w;
+  if ("rot" in patch) row.rot = patch.rot;
   const { error } = await requireClient().from("board_items").update(row).eq("id", id);
   if (error) throw error;
   return true;
