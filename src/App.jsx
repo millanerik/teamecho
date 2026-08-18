@@ -388,21 +388,36 @@ body { background:#262A31; }
   border-top-color:var(--accent-bright); animation:te-spin .8s linear infinite;
 }
 @keyframes te-spin{to{transform:rotate(360deg)}}
-.sticker.selected .inner{border-color:var(--accent-bright); box-shadow:0 0 0 2px var(--accent-bright), var(--sticker-shadow);}
-.pin-toolbar{
-  position:absolute; left:50%; bottom:-48px; width:max-content; translate:-50% 0;
-  display:flex; align-items:center; gap:2px; padding:5px;
-  background:var(--panel); border:1px solid var(--border-strong); border-radius:999px;
-  box-shadow:var(--shadow); pointer-events:auto;
+.sticker.selected .inner{border-color:var(--accent-bright); box-shadow:0 0 0 1.5px var(--accent-bright), var(--sticker-shadow);}
+
+/* free-transform handles (Photoshop style) */
+.tf-handle{
+  position:absolute; width:14px; height:14px; border-radius:3px;
+  background:var(--panel); border:1.5px solid var(--accent-bright);
+  box-shadow:0 1px 4px rgba(0,0,0,.4); z-index:3; touch-action:none;
 }
-.pin-toolbar button{
-  width:30px; height:30px; border-radius:50%; border:none; background:transparent;
-  color:var(--ink); display:grid; place-items:center; cursor:pointer; transition:background .15s;
+.tf-handle:hover{background:var(--accent-bright)}
+.tf-stem{
+  position:absolute; left:50%; top:-26px; width:1.5px; height:26px;
+  background:var(--accent-bright); translate:-50% 0; z-index:2; pointer-events:none;
 }
-.pin-toolbar button:hover:not(:disabled){background:var(--card-2)}
-.pin-toolbar button:disabled{opacity:.35; cursor:not-allowed}
-.pin-tb-val{font-family:var(--font-mono); font-size:11px; color:var(--ink-soft); min-width:34px; text-align:center}
-.pin-tb-sep{width:1px; height:18px; background:var(--border-strong); margin:0 3px}
+.tf-rotate{
+  position:absolute; left:50%; top:-40px; translate:-50% 0;
+  width:26px; height:26px; border-radius:50%;
+  background:var(--panel); border:1.5px solid var(--accent-bright); color:var(--accent-bright);
+  display:grid; place-items:center; cursor:grab; z-index:3; touch-action:none;
+  box-shadow:0 2px 6px rgba(0,0,0,.4);
+}
+.tf-rotate:hover{background:var(--accent-bright); color:#fff}
+.tf-rotate:active{cursor:grabbing}
+.tf-reset{
+  position:absolute; right:-14px; bottom:-40px;
+  width:28px; height:28px; border-radius:50%;
+  background:var(--panel); border:1px solid var(--border-strong); color:var(--ink);
+  display:grid; place-items:center; cursor:pointer; z-index:3;
+  box-shadow:var(--shadow); transition:background .15s;
+}
+.tf-reset:hover{background:var(--card-2)}
 
 /* ---------- GIF picker ---------- */
 .gif-modal{width:min(560px,100%)}
@@ -712,37 +727,108 @@ export default function TeamEcho() {
     }
   };
 
-  /* ---------- resize & rotate (images / gifs) ---------- */
+  /* ---------- resize & rotate (all pins: images, gifs, notes) ---------- */
   const MIN_W = 90;    // px — keep pins from vanishing
   const MAX_W = 340;   // px — "nothing too big": ~a third of a typical board
 
   const clampW = (w) => Math.max(MIN_W, Math.min(MAX_W, Math.round(w)));
 
-  // Persist size/rotation, debounced so we don't spam the DB while nudging.
+  // Persist size/rotation, debounced so we don't spam the DB while dragging.
   const persistTimer = useRef(null);
   const persistPin = (id, patch) => {
     clearTimeout(persistTimer.current);
     persistTimer.current = setTimeout(() => {
       updateBoardItem(id, patch).catch(console.error);
-    }, 500);
+    }, 400);
   };
 
+  // keyboard nudge helpers (used by the accessibility path)
   const resizePin = (item, deltaW) => {
     const next = clampW(item.w + deltaW);
     if (next === item.w) return;
     setItems((prev) => prev.map((i) => (i.id === item.id ? { ...i, w: next } : i)));
     persistPin(item.id, { w: next });
   };
-
   const rotatePin = (item, deltaDeg) => {
     const next = Math.round((item.rot + deltaDeg) * 10) / 10;
     setItems((prev) => prev.map((i) => (i.id === item.id ? { ...i, rot: next } : i)));
     persistPin(item.id, { rot: next });
   };
-
   const resetPin = (item) => {
-    setItems((prev) => prev.map((i) => (i.id === item.id ? { ...i, w: 180, rot: 0 } : i)));
-    persistPin(item.id, { w: 180, rot: 0 });
+    const w = item.type === "text" ? 190 : 180;
+    setItems((prev) => prev.map((i) => (i.id === item.id ? { ...i, w, rot: 0 } : i)));
+    persistPin(item.id, { w, rot: 0 });
+  };
+
+  /* ---------- free-transform via corner handles (Photoshop-style) ---------- */
+  const transformRef = useRef(null);
+
+  // Center of the pin's rendered box, in canvas pixels.
+  const pinCenterPx = (item, canvasRect) => {
+    const el = document.querySelector(`[data-pin="${item.id}"]`);
+    if (!el) return null;
+    const r = el.getBoundingClientRect();
+    return {
+      cx: r.left + r.width / 2 - canvasRect.left,
+      cy: r.top + r.height / 2 - canvasRect.top,
+    };
+  };
+
+  const onHandleDown = (e, item, mode) => {
+    e.stopPropagation();
+    e.preventDefault();
+    const canvasRect = canvasRef.current.getBoundingClientRect();
+    const center = pinCenterPx(item, canvasRect);
+    if (!center) return;
+    const px = e.clientX - canvasRect.left;
+    const py = e.clientY - canvasRect.top;
+    const startAngle = Math.atan2(py - center.cy, px - center.cx) * (180 / Math.PI);
+    const startDist = Math.hypot(px - center.cx, py - center.cy);
+    // bring to front while transforming
+    const newZ = zRef.current++;
+    setItems((prev) => prev.map((i) => (i.id === item.id ? { ...i, z: newZ } : i)));
+    transformRef.current = {
+      id: item.id,
+      mode,                         // "resize" | "rotate"
+      canvasRect,
+      center,
+      startAngle,
+      startRot: item.rot,
+      startDist: startDist || 1,
+      startW: item.w,
+    };
+    e.currentTarget.setPointerCapture(e.pointerId);
+  };
+
+  const onHandleMove = (e) => {
+    const t = transformRef.current;
+    if (!t) return;
+    const px = e.clientX - t.canvasRect.left;
+    const py = e.clientY - t.canvasRect.top;
+
+    if (t.mode === "rotate") {
+      const ang = Math.atan2(py - t.center.cy, px - t.center.cx) * (180 / Math.PI);
+      let next = Math.round((t.startRot + (ang - t.startAngle)) * 10) / 10;
+      // normalise to -180..180 for tidy stored values
+      while (next > 180) next -= 360;
+      while (next < -180) next += 360;
+      setItems((prev) => prev.map((i) => (i.id === t.id ? { ...i, rot: next } : i)));
+    } else {
+      const dist = Math.hypot(px - t.center.cx, py - t.center.cy);
+      const next = clampW((t.startW * dist) / t.startDist);
+      setItems((prev) => prev.map((i) => (i.id === t.id ? { ...i, w: next } : i)));
+    }
+  };
+
+  const onHandleUp = () => {
+    const t = transformRef.current;
+    transformRef.current = null;
+    if (!t) return;
+    setItems((prev) => {
+      const it = prev.find((i) => i.id === t.id);
+      if (it) persistPin(it.id, { w: it.w, rot: it.rot, z: it.z });
+      return prev;
+    });
   };
 
   /* ---------- GIF picker ---------- */
@@ -774,7 +860,7 @@ export default function TeamEcho() {
 
   /* ---------- drag & drop ---------- */
   const onStickerDown = (e, item) => {
-    if (e.target.closest(".del")) return;
+    if (e.target.closest(".del, .tf-handle, .tf-rotate, .tf-reset")) return;
     const rect = canvasRef.current.getBoundingClientRect();
     const newZ = zRef.current++;
     setItems((prev) => prev.map((i) => (i.id === item.id ? { ...i, z: newZ } : i)));
@@ -819,8 +905,8 @@ export default function TeamEcho() {
       removeItem(item);
       return;
     }
-    // resize / rotate for images & gifs you can edit
-    else if ((item.type === "image" || item.type === "gif") && (isAdmin || item.owner === me.id)) {
+    // resize / rotate for any pin you can edit
+    else if (isAdmin || item.owner === me.id) {
       if (e.key === "+" || e.key === "=") { e.preventDefault(); resizePin(item, 24); return; }
       if (e.key === "-" || e.key === "_") { e.preventDefault(); resizePin(item, -24); return; }
       if (e.key === "[") { e.preventDefault(); rotatePin(item, -15); return; }
@@ -1174,11 +1260,11 @@ export default function TeamEcho() {
               .map((item) => {
               const canEdit = isAdmin || item.owner === me.id;
               const noteC = NOTE_COLORS.find((c) => c.id === item.color) || NOTE_COLORS[0];
-              const isImg = item.type === "image" || item.type === "gif";
               const isSelected = selectedId === item.id;
               return (
                 <div
                   key={item.id}
+                  data-pin={item.id}
                   className={`sticker ${dragRef.current?.id === item.id ? "dragging" : ""} ${isSelected ? "selected" : ""}`}
                   style={{
                     left: `${item.x}%`,
@@ -1189,13 +1275,13 @@ export default function TeamEcho() {
                   }}
                   tabIndex={0}
                   role="group"
-                  aria-label={`${item.type === "text" ? "Note" : "Image"} pinned by ${item.ownerName}. Arrow keys move${isImg ? ", +/- resize, [ ] rotate" : ""}, Delete removes.`}
+                  aria-label={`${item.type === "text" ? "Note" : "Image"} pinned by ${item.ownerName}. Arrow keys move${canEdit ? ", plus and minus resize, brackets rotate" : ""}, Delete removes.`}
                   onKeyDown={(e) => onStickerKeyDown(e, item)}
                   onPointerDown={(e) => onStickerDown(e, item)}
                   onPointerMove={onStickerMove}
                   onPointerUp={onStickerUp}
                   onPointerCancel={onStickerUp}
-                  onClick={() => canEdit && isImg && setSelectedId(isSelected ? null : item.id)}
+                  onClick={() => canEdit && setSelectedId(isSelected ? null : item.id)}
                 >
                   <div
                     className="inner"
@@ -1218,33 +1304,56 @@ export default function TeamEcho() {
                     <button className="del" onClick={(e) => { e.stopPropagation(); removeItem(item); }} aria-label="Remove pin">×</button>
                   )}
 
-                  {/* resize / rotate toolbar — only for a selected image or gif you can edit */}
-                  {isSelected && isImg && canEdit && (
-                    <div
-                      className="pin-toolbar"
-                      style={{ transform: `rotate(${-item.rot}deg)` }}
-                      onPointerDown={(e) => e.stopPropagation()}
-                      onClick={(e) => e.stopPropagation()}
-                    >
-                      <button onClick={() => resizePin(item, -24)} disabled={item.w <= MIN_W} aria-label="Make smaller" title="Smaller">
-                        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><path d="M5 12h14" /></svg>
+                  {/* Photoshop-style free transform — shown when selected */}
+                  {isSelected && canEdit && (
+                    <>
+                      {/* four corner resize handles */}
+                      {[
+                        ["nw", { top: -7, left: -7, cursor: "nwse-resize" }],
+                        ["ne", { top: -7, right: -7, cursor: "nesw-resize" }],
+                        ["se", { bottom: -7, right: -7, cursor: "nwse-resize" }],
+                        ["sw", { bottom: -7, left: -7, cursor: "nesw-resize" }],
+                      ].map(([corner, pos]) => (
+                        <span
+                          key={corner}
+                          className="tf-handle"
+                          style={pos}
+                          onPointerDown={(e) => onHandleDown(e, item, "resize")}
+                          onPointerMove={onHandleMove}
+                          onPointerUp={onHandleUp}
+                          onPointerCancel={onHandleUp}
+                          onClick={(e) => e.stopPropagation()}
+                          aria-hidden="true"
+                        />
+                      ))}
+                      {/* rotation handle on a stem above the top edge */}
+                      <span className="tf-stem" aria-hidden="true" />
+                      <span
+                        className="tf-rotate"
+                        onPointerDown={(e) => onHandleDown(e, item, "rotate")}
+                        onPointerMove={onHandleMove}
+                        onPointerUp={onHandleUp}
+                        onPointerCancel={onHandleUp}
+                        onClick={(e) => e.stopPropagation()}
+                        title="Drag to rotate"
+                        aria-hidden="true"
+                      >
+                        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                          <path d="M21 12a9 9 0 1 1-3-6.7L21 8" /><path d="M21 3v5h-5" />
+                        </svg>
+                      </span>
+                      {/* small reset control, counter-rotated to stay upright */}
+                      <button
+                        className="tf-reset"
+                        style={{ transform: `rotate(${-item.rot}deg)` }}
+                        onPointerDown={(e) => e.stopPropagation()}
+                        onClick={(e) => { e.stopPropagation(); resetPin(item); }}
+                        title="Reset size & rotation"
+                        aria-label="Reset size and rotation"
+                      >
+                        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M3 12a9 9 0 1 1 9 9" /><path d="M3 12v-5" /><path d="M3 12h5" /></svg>
                       </button>
-                      <span className="pin-tb-val" aria-hidden="true">{Math.round((item.w / MAX_W) * 100)}%</span>
-                      <button onClick={() => resizePin(item, 24)} disabled={item.w >= MAX_W} aria-label="Make bigger" title="Bigger">
-                        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><path d="M12 5v14M5 12h14" /></svg>
-                      </button>
-                      <span className="pin-tb-sep" />
-                      <button onClick={() => rotatePin(item, -15)} aria-label="Rotate left" title="Rotate left">
-                        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M3 12a9 9 0 1 0 3-6.7L3 8" /><path d="M3 3v5h5" /></svg>
-                      </button>
-                      <button onClick={() => rotatePin(item, 15)} aria-label="Rotate right" title="Rotate right">
-                        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 12a9 9 0 1 1-3-6.7L21 8" /><path d="M21 3v5h-5" /></svg>
-                      </button>
-                      <span className="pin-tb-sep" />
-                      <button onClick={() => resetPin(item)} aria-label="Reset size and rotation" title="Reset">
-                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M3 12a9 9 0 1 1 9 9" /><path d="M3 12v-5" /><path d="M3 12h5" /></svg>
-                      </button>
-                    </div>
+                    </>
                   )}
                 </div>
               );
